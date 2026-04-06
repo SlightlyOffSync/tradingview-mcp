@@ -14,6 +14,7 @@ import { registerWatchlistTools } from './tools/watchlist.js';
 import { registerUiTools } from './tools/ui.js';
 import { registerPaneTools } from './tools/pane.js';
 import { registerTabTools } from './tools/tab.js';
+import { registerAnalystTools } from './tools/analyst.js';
 
 const server = new McpServer(
   {
@@ -22,7 +23,27 @@ const server = new McpServer(
     description: 'AI-assisted TradingView chart analysis and Pine Script development via Chrome DevTools Protocol',
   },
   {
-    instructions: `TradingView MCP — 78 tools for reading and controlling a live TradingView Desktop chart.
+    instructions: `TradingView MCP — low-level TradingView control plus higher-level analyst wrapper packets.
+
+WRAPPER-FIRST RULE:
+- Prefer analyst wrapper tools for narrative-analysis workflows
+- Reuse wrapper packets already built in the current run unless refresh is required
+- Fall back to raw TradingView tools only when the wrapper does not expose enough detail or when the task is inherently low-level
+
+HIGH-LEVEL ANALYST TOOLS:
+- build_chart_context_packet → compact multi-timeframe technical packet for one symbol
+- build_market_session_packet → session evidence packet with checkpoints, rankings, spreads, structure stats, screenshots, and data-quality metadata
+- run_headline_response_test → compare expected vs observed market response around a timestamped headline
+- build_cross_asset_regime_packet → summarize cross-asset behavior over a window
+- build_vehicle_watchlist_packet → map a thesis/regime view to candidate vehicles and invalidations
+- build_narrative_validation_packet → gather support, contradiction, and missing evidence for one narrative hypothesis
+
+Use these wrappers by default for:
+- market_structure_verification
+- headline_response_test
+- vehicle_watchlist
+- entity_shallow_research
+- narrative validation
 
 TOOL SELECTION GUIDE — use this to pick the right tool:
 
@@ -84,6 +105,7 @@ registerWatchlistTools(server);
 registerUiTools(server);
 registerPaneTools(server);
 registerTabTools(server);
+registerAnalystTools(server);
 
 // Startup notice (stderr so it doesn't interfere with MCP stdio protocol)
 process.stderr.write('⚠  tradingview-mcp  |  Unofficial tool. Not affiliated with TradingView Inc. or Anthropic.\n');

@@ -158,6 +158,7 @@ tv pine compile                    # compile Pine Script
 tv pane layout 2x2                 # 4-chart grid
 tv pane symbol 1 ES1!              # set pane symbol
 tv stream quote | jq '.close'      # monitor price changes
+tv analyst watchlist --topic "US relief rally after geopolitical scare" --regime "short-term relief, medium-term fragile" --classes index,sector,hedge
 ```
 
 ### All Commands
@@ -178,7 +179,45 @@ tv replay start/step/stop/status/autoplay/trade
 tv stream quote/bars/values/lines/labels/tables/all
 tv ui click/keyboard/hover/scroll/find/eval/type/panel/fullscreen/mouse
 tv screenshot / discover / ui-state / range / scroll
+tv analyst chart-context/market-session/headline-response/cross-asset/watchlist/validate-narrative
 ```
+
+## Analyst Wrapper Layer
+
+The repository now includes a higher-level analyst wrapper surface for narrative-analysis workflows. These wrappers compress repeated low-level chart choreography into stable packets with:
+
+- `success`, `warnings`, `partial_results`, `data_freshness`, and `provenance`
+- cached symbol/timeframe work inside a run
+- compact summaries instead of raw data dumps
+- MCP tools and matching `tv analyst ...` CLI subcommands
+
+Primary wrapper tools:
+
+- `build_chart_context_packet`
+- `build_market_session_packet`
+- `run_headline_response_test`
+- `build_cross_asset_regime_packet`
+- `build_vehicle_watchlist_packet`
+- `build_narrative_validation_packet`
+
+Example CLI calls:
+
+```bash
+tv analyst chart-context --symbol XLE --timeframes 15,60,D --preset macro_trend --pine
+tv analyst chart-context --symbol CME_MINI:ES1! --timeframes 5,60,D --preset none
+tv analyst market-session --date 2026-04-02 --region US --checkpoints premarket,open_30m,midday,close --benchmarks SPY,QQQ,IWM --sectors XLK,XLF,XLE --hedges TLT,GLD,VIX
+tv analyst cleanup-screenshots --hours 24
+tv analyst cross-asset --from 2026-03-28 --to 2026-04-06 --assets '{"equities":["SPY","QQQ"],"rates":["TLT"],"vol":["VIX"],"gold":["GLD"],"crypto":["BTCUSD"]}'
+```
+
+Known limitations:
+
+- `build_chart_context_packet` is fully backed by live TradingView chart state.
+- `build_market_session_packet` is now evidence-first: it exposes checkpoint matrices, rankings, spreads, structure stats, screenshots, and data-quality metadata rather than returning narrative conclusions.
+- when the requested session date has no intraday bars yet, `build_market_session_packet` falls back to the nearest available session and marks `requested_session_date` vs `resolved_session_date` explicitly.
+- high-level analyst wrappers trigger an asynchronous stale-screenshot cleanup pass; `cleanup_stale_screenshots` / `tv analyst cleanup-screenshots` can also be called directly.
+- multi-symbol session, cross-asset, and headline-response wrappers support dependency-injected market-data providers; without one they fall back to TradingView snapshots where possible and mark partial results when the required granularity is unavailable.
+- raw TradingView tools still remain necessary for exceptional visual checks, custom Pine inspection, replay, and any unsupported indicator-specific detail.
 
 ## Streaming
 

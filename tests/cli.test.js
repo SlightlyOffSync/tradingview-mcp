@@ -78,6 +78,14 @@ describe('CLI — help and routing', () => {
     assert.ok(stdout.includes('--count'));
     assert.ok(stdout.includes('--summary'));
   });
+
+  it('analyst --help shows subcommands', () => {
+    const { stdout, exitCode } = run(['analyst', '--help']);
+    assert.equal(exitCode, 0);
+    assert.ok(stdout.includes('chart-context'));
+    assert.ok(stdout.includes('market-session'));
+    assert.ok(stdout.includes('headline-response'));
+  });
 });
 
 describe('CLI — pine analyze (offline)', () => {

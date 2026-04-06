@@ -2,6 +2,8 @@
  * Core data access logic.
  */
 import { evaluate, evaluateAsync, KNOWN_PATHS, safeString } from '../connection.js';
+import * as chart from './chart.js';
+import { normalizeSymbol, symbolsMatch } from './symbol-resolver.js';
 
 const MAX_OHLCV_BARS = 500;
 const MAX_TRADES = 20;
@@ -242,17 +244,33 @@ export async function getEquity() {
   return { success: true, data_points: equity?.data?.length || 0, source: equity?.source, data: equity?.data || [], equity_summary: equity?.equity_summary, note: equity?.note, error: equity?.error };
 }
 
-export async function getQuote({ symbol } = {}) {
-  const data = await evaluate(`
+export async function getQuote({ symbol, _deps } = {}) {
+  const evalFn = _deps?.evaluate || evaluate;
+  let normalization = null;
+  if (symbol) {
+    normalization = await normalizeSymbol({ symbol }, { _deps: { chart: _deps?.chart || chart } });
+    const requestedTarget = normalization?.success ? normalization.resolved_symbol : symbol;
+    await (_deps?.chart?.setSymbol || chart.setSymbol)({ symbol: requestedTarget, _deps });
+    const state = await (_deps?.chart?.getState || chart.getState)({ _deps });
+    const activeSymbol = state?.symbol || requestedTarget;
+    if (!symbolsMatch(requestedTarget, activeSymbol) && !symbolsMatch(symbol, activeSymbol)) {
+      throw new Error(`Requested quote for ${symbol}, but active chart remained ${activeSymbol}`);
+    }
+  }
+
+  const data = await evalFn(`
     (function() {
       var api = ${CHART_API};
-      var sym = ${safeString(symbol || '')};
-      if (!sym) { try { sym = api.symbol(); } catch(e) {} }
+      var requestedSym = ${safeString(symbol || '')};
+      var sym = '';
+      try { sym = api.symbol(); } catch(e) {}
       if (!sym) { try { sym = api.symbolExt().symbol; } catch(e) {} }
+      if (!requestedSym) requestedSym = sym;
       var ext = {};
       try { ext = api.symbolExt() || {}; } catch(e) {}
+      var resolvedSym = sym || ext.symbol || requestedSym;
       var bars = ${BARS_PATH};
-      var quote = { symbol: sym };
+      var quote = { symbol: resolvedSym, requested_symbol: requestedSym, resolved_symbol: resolvedSym };
       if (bars && typeof bars.lastIndex === 'function') {
         var last = bars.valueAt(bars.lastIndex());
         if (last) { quote.time = last[0]; quote.open = last[1]; quote.high = last[2]; quote.low = last[3]; quote.close = last[4]; quote.last = last[4]; quote.volume = last[5] || 0; }
@@ -274,7 +292,22 @@ export async function getQuote({ symbol } = {}) {
     })()
   `);
   if (!data || (!data.last && !data.close)) throw new Error('Could not retrieve quote. The chart may still be loading.');
-  return { success: true, ...data };
+  if (symbol && !symbolsMatch(symbol, data.resolved_symbol) && !symbolsMatch(normalization?.resolved_symbol, data.resolved_symbol)) {
+    throw new Error(`Requested quote for ${symbol}, but quote source resolved to ${data.resolved_symbol}`);
+  }
+  return {
+    success: true,
+    ...data,
+    ...(normalization ? {
+      requested_symbol: normalization.requested_symbol,
+      resolved_symbol: data.resolved_symbol,
+      symbol_normalization: {
+        confidence: normalization.confidence,
+        resolution_method: normalization.resolution_method,
+        alternates: normalization.alternates,
+      },
+    } : {}),
+  };
 }
 
 export async function getDepth() {
