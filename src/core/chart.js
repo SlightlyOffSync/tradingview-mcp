@@ -4,7 +4,18 @@
 import { evaluate as _evaluate, evaluateAsync as _evaluateAsync, safeString, requireFinite } from '../connection.js';
 import { waitForChartReady as _waitForChartReady } from '../wait.js';
 
-const CHART_API = 'window.TradingViewApi._activeChartWidgetWV.value()';
+const CHART_API = `(
+  function() {
+    var api = window.TradingViewApi;
+    if (!api) return null;
+    var active = api._activeChartWidgetWV;
+    if (active && typeof active.value === 'function') return active.value();
+    if (typeof active === 'function') return active();
+    if (active && typeof active === 'object') return active;
+    if (window.ChartApiInstance) return window.ChartApiInstance;
+    return null;
+  }
+)()`;
 
 function _resolve(deps) {
   return {

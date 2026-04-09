@@ -11,16 +11,63 @@ export function register(name, config) {
   commands.set(name, config);
 }
 
+function parseArgsOptions(options = {}) {
+  return Object.fromEntries(
+    Object.entries(options).map(([name, config]) => [
+      name,
+      { type: config.type, ...(config.short ? { short: config.short } : {}) },
+    ]),
+  );
+}
+
+function printOptions(options = {}) {
+  if (Object.keys(options).length === 0) return;
+  console.log('\nOptions:');
+  for (const [k, v] of Object.entries(options)) {
+    const flag = v.short ? `-${v.short}, --${k}` : `    --${k}`;
+    const meta = [
+      v.required ? 'required' : null,
+      v.type === 'string' && v.example ? `example: ${v.example}` : null,
+      v.type === 'boolean' ? 'flag' : null,
+    ].filter(Boolean).join('; ');
+    const suffix = meta ? ` (${meta})` : '';
+    console.log(`  ${flag.padEnd(20)}${v.description || ''}${suffix}`);
+  }
+}
+
+function summarizeRequirements(cmd) {
+  const requirements = [];
+  const options = cmd.options || {};
+  const required = Object.entries(options)
+    .filter(([, config]) => config.required)
+    .map(([name]) => `--${name}`);
+  if (required.length > 0) requirements.push(`in: ${required.join(' ')}`);
+  if (cmd.output) requirements.push(`out: ${cmd.output}`);
+  return requirements.length > 0 ? ` [${requirements.join(' | ')}]` : '';
+}
+
 function printHelp() {
   console.log('Usage: tv <command> [options]\n');
   console.log('Commands:');
-  const maxLen = Math.max(...[...commands.keys()].map(k => k.length));
+  const labels = [];
+  for (const [name, cmd] of commands) {
+    labels.push(name);
+    if (cmd.subcommands) {
+      for (const [subName] of cmd.subcommands) {
+        labels.push(`${name} ${subName}`);
+      }
+    }
+  }
+  const maxLen = Math.max(...labels.map(label => label.length));
   for (const [name, cmd] of commands) {
     if (cmd.subcommands) {
       const subs = [...cmd.subcommands.keys()].join(', ');
       console.log(`  ${name.padEnd(maxLen + 2)}${cmd.description}  [${subs}]`);
+      for (const [subName, subCmd] of cmd.subcommands) {
+        console.log(`  ${`${name} ${subName}`.padEnd(maxLen + 2)}${subCmd.description}${summarizeRequirements(subCmd)}`);
+      }
     } else {
-      console.log(`  ${name.padEnd(maxLen + 2)}${cmd.description}`);
+      console.log(`  ${name.padEnd(maxLen + 2)}${cmd.description}${summarizeRequirements(cmd)}`);
     }
   }
   console.log('\nRun "tv <command> --help" for command-specific options.');
@@ -40,14 +87,8 @@ function printCommandHelp(name, cmd) {
     console.log(`Usage: tv ${name} [options]\n`);
     console.log(cmd.description);
   }
-  const opts = cmd.options || {};
-  if (Object.keys(opts).length > 0) {
-    console.log('\nOptions:');
-    for (const [k, v] of Object.entries(opts)) {
-      const flag = v.short ? `-${v.short}, --${k}` : `    --${k}`;
-      console.log(`  ${flag.padEnd(20)}${v.description || ''}`);
-    }
-  }
+  if (cmd.details) console.log(`\n${cmd.details}`);
+  printOptions(cmd.options || {});
 }
 
 export async function run(argv) {
@@ -87,20 +128,15 @@ export async function run(argv) {
     try {
       const { values, positionals } = parseArgs({
         args: args.slice(2),
-        options: { help: { type: 'boolean', short: 'h' }, ...options },
+        options: { help: { type: 'boolean', short: 'h' }, ...parseArgsOptions(options) },
         allowPositionals: true,
         strict: false,
       });
       if (values.help) {
         console.log(`Usage: tv ${cmdName} ${subName} [options]\n`);
         console.log(sub.description);
-        if (Object.keys(options).length > 0) {
-          console.log('\nOptions:');
-          for (const [k, v] of Object.entries(options)) {
-            const flag = v.short ? `-${v.short}, --${k}` : `    --${k}`;
-            console.log(`  ${flag.padEnd(20)}${v.description || ''}`);
-          }
-        }
+        if (sub.details) console.log(`\n${sub.details}`);
+        printOptions(options);
         process.exit(0);
       }
       await execute(handler, values, positionals);
@@ -113,7 +149,7 @@ export async function run(argv) {
     try {
       const { values, positionals } = parseArgs({
         args: args.slice(1),
-        options: { help: { type: 'boolean', short: 'h' }, ...options },
+        options: { help: { type: 'boolean', short: 'h' }, ...parseArgsOptions(options) },
         allowPositionals: true,
         strict: false,
       });

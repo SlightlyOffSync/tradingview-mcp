@@ -74,19 +74,31 @@ export async function normalizeSymbol({ symbol }, { _deps } = {}) {
   }
 
   const requestedUpper = upper(requestedSymbol);
+  const requestedBare = bareSymbol(requestedUpper);
   const preferred = unique([
     ...(KNOWN_SYMBOL_MAPPINGS[requestedUpper] || []),
     requestedUpper.includes(':') ? requestedUpper : null,
   ]);
 
-  if (requestedUpper.includes(':') && preferred.length === 1) {
+  if (requestedUpper.includes(':')) {
     return {
       success: true,
       requested_symbol: requestedSymbol,
-      resolved_symbol: preferred[0],
+      resolved_symbol: requestedBare,
       alternates: [],
       confidence: 'high',
-      resolution_method: 'input_prefixed',
+      resolution_method: 'input_prefixed_stripped',
+    };
+  }
+
+  if (KNOWN_SYMBOL_MAPPINGS[requestedUpper]?.length) {
+    return {
+      success: true,
+      requested_symbol: requestedSymbol,
+      resolved_symbol: requestedUpper,
+      alternates: unique(KNOWN_SYMBOL_MAPPINGS[requestedUpper].map(item => bareSymbol(item))).filter(item => item !== requestedUpper),
+      confidence: 'high',
+      resolution_method: 'known_mapping_bare',
     };
   }
 
@@ -103,6 +115,7 @@ export async function normalizeSymbol({ symbol }, { _deps } = {}) {
   }
 
   const candidates = unique([
+    requestedBare,
     ...preferred,
     ...results.map(item => upper(item.full_name || item.symbol)),
   ]).map(fullName => {

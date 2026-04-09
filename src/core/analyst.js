@@ -315,8 +315,10 @@ async function ensureSymbol(symbol, deps, provenance, warnings = []) {
   );
 
   const candidates = [
-    normalization?.resolved_symbol,
     symbol,
+    String(symbol).split(':').pop(),
+    normalization?.resolved_symbol,
+    ...(normalization?.alternates || []).map(item => String(item).split(':').pop()),
     ...(normalization?.alternates || []),
   ].filter(Boolean);
   let lastActual = '';
@@ -523,6 +525,27 @@ function buildCheckpointConfig(sessionWindow) {
     midday: { timestamp: sessionWindow.midday, rankingField: 'return_from_open_pct' },
     close: { timestamp: sessionWindow.close, rankingField: 'return_from_open_pct' },
   };
+}
+
+function normalizeCheckpointName(name) {
+  const raw = String(name || '').trim();
+  if (!raw) return null;
+  const canonical = raw.toLowerCase();
+  const directMap = {
+    premarket: 'premarket',
+    open: 'open',
+    open_30m: 'open_30m',
+    midday: 'midday',
+    close: 'close',
+    '09:25': 'premarket',
+    '09:30': 'open',
+    '10:00': 'open_30m',
+    '12:00': 'midday',
+    '15:55': 'close',
+    '16:00': 'close',
+  };
+  if (directMap[canonical]) return directMap[canonical];
+  return null;
 }
 
 function buildCheckpointCoverage(checkpointBars) {
@@ -1400,6 +1423,19 @@ export async function buildMarketSessionPacket(args, { _deps } = {}) {
   const now = deps.now();
   const warnings = [];
   const errors = [];
+  const normalizedCheckpoints = [...new Set(
+    input.checkpoints
+      .map(name => normalizeCheckpointName(name))
+      .filter(Boolean),
+  )];
+  if (normalizedCheckpoints.length !== input.checkpoints.length) {
+    warnings.push({
+      code: 'checkpoint_names_normalized',
+      requested: input.checkpoints,
+      normalized: normalizedCheckpoints,
+      message: 'One or more checkpoints were normalized to supported session keys',
+    });
+  }
   const provenance = {
     sources: ['tradingview-mcp'],
     underlying_tools: [],
@@ -1471,8 +1507,8 @@ export async function buildMarketSessionPacket(args, { _deps } = {}) {
     }
   }
 
-  const availableCheckpoints = input.checkpoints.slice(0, Math.max(3, input.checkpoints.length));
-  if (input.checkpoints.length < 3) {
+  const availableCheckpoints = normalizedCheckpoints.slice(0, Math.max(3, normalizedCheckpoints.length));
+  if (normalizedCheckpoints.length < 3) {
     warnings.push({ code: 'checkpoint_count_low', message: 'At least 3 checkpoints are recommended' });
   }
   const resolvedSessionDates = [...new Set(symbolPackets.map(packet => packet.resolved_session_date).filter(Boolean))];

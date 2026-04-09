@@ -376,6 +376,24 @@ describe('analyst wrappers', () => {
     assert.ok(result.data.data_quality.every(item => item.session_date_fallback_used === true));
   });
 
+  it('buildMarketSessionPacket accepts clock-style checkpoints for market status scans', async () => {
+    const { deps } = makeDeps();
+    const result = await buildMarketSessionPacket({
+      session_date: '2026-04-02',
+      region: 'US',
+      checkpoints: ['09:30', '10:00', '12:00', '15:55'],
+      benchmarks: ['SPY', 'QQQ'],
+      sectors: ['XLK'],
+      hedges: ['TLT'],
+      optional_symbols: [],
+    }, { _deps: deps });
+
+    assert.equal(result.success, true);
+    assert.ok(result.data.session_definition.checkpoints.open.includes('-04:00'));
+    assert.ok(result.data.session_definition.checkpoints.open_30m.includes('-04:00'));
+    assert.ok(result.data.checkpoint_rankings.open_30m.length >= 1);
+  });
+
   it('buildMarketSessionPacket fails clearly for unsupported regions', async () => {
     const { deps } = makeDeps();
     const result = await buildMarketSessionPacket({
