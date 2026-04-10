@@ -25,6 +25,8 @@ import './commands/ui.js';
 import './commands/pane.js';
 import './commands/tab.js';
 import './commands/news.js';
+import './commands/documents.js';
+import './commands/financials.js';
 import './commands/stream.js';
 import './commands/analyst.js';
 

@@ -16,3 +16,5 @@ export * as indicators from './indicators.js';
 export * as ui from './ui.js';
 export * as analyst from './analyst.js';
 export * as news from './news.js';
+export * as documents from './documents.js';
+export * as financials from './financials.js';

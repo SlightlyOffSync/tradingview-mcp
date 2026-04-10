@@ -15,6 +15,7 @@ import { registerUiTools } from './tools/ui.js';
 import { registerPaneTools } from './tools/pane.js';
 import { registerTabTools } from './tools/tab.js';
 import { registerNewsTools } from './tools/news.js';
+import { registerSymbolPageTools } from './tools/symbol-pages.js';
 import { registerAnalystTools } from './tools/analyst.js';
 
 const server = new McpServer(
@@ -82,6 +83,7 @@ Launch: tv_launch → auto-detect and start TradingView with CDP on any platform
 Panes: pane_list, pane_set_layout (s, 2h, 2v, 4, 6, 8), pane_focus, pane_set_symbol
 Tabs: tab_list, tab_new, tab_close, tab_switch
 News: news_list, news_detail
+Symbol pages: documents_get, financials_get
 
 CONTEXT MANAGEMENT:
 - ALWAYS use summary=true on data_get_ohlcv
@@ -108,6 +110,7 @@ registerUiTools(server);
 registerPaneTools(server);
 registerTabTools(server);
 registerNewsTools(server);
+registerSymbolPageTools(server);
 registerAnalystTools(server);
 
 // Startup notice (stderr so it doesn't interfere with MCP stdio protocol)
