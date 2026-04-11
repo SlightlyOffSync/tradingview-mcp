@@ -4,7 +4,10 @@ import { closeTab, list, newTab, switchTab } from './tab.js';
 
 const CDP_HOST = 'localhost';
 const CDP_PORT = 9222;
-const DOCUMENT_ACTION_SELECTOR = 'button.wrap-q8y6hlvZ, button[class*="wrap-q8y6hlvZ"]';
+
+function isDocumentActionLabel(value) {
+  return /transcript|slides|report|release|filing/i.test(clean(value));
+}
 
 function clean(value) {
   return String(value || '')
@@ -106,7 +109,7 @@ async function waitForReady(targetId, expectedUrl, { requireBodyText = false, at
         (() => ({
           href: location.href,
           ready: document.readyState,
-          body_length: clean(document.body?.innerText || '').length
+          body_length: String(document.body?.innerText || '').replace(/[\\u200B-\\u200D\\uFEFF]/g, '').replace(/\\s+/g, ' ').trim().length
         }))()
       `);
       const urlMatches = !expectedUrl || String(status.href || '').startsWith(expectedUrl);
@@ -152,6 +155,16 @@ function linesToMarkdown(lines = []) {
   return lines.filter(Boolean).join('\n');
 }
 
+function uniqueBy(items, keyFn) {
+  const seen = new Set();
+  return items.filter((item) => {
+    const key = keyFn(item);
+    if (!key || seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
 function normalizeDocumentButtonLabel(value) {
   return clean(value)
     .replace(/\bEarning\b/gi, 'Earnings')
@@ -163,10 +176,18 @@ async function readDocumentCards(targetId, { limit } = {}) {
   const cards = await evaluateOnTarget(targetId, `
     (() => {
       const cleanText = (value) => String(value || '').replace(/\\s+/g, ' ').trim();
-      const actionsSelector = ${JSON.stringify(DOCUMENT_ACTION_SELECTOR)};
+      const isAction = (value) => /transcript|slides|report|release|filing/i.test(cleanText(value));
+      const getActions = (card) => Array.from(card.querySelectorAll('button, [role="button"], a'))
+        .map((node, actionIndex) => ({
+          id: actionIndex + 1,
+          label: cleanText(node.innerText || node.getAttribute?.('aria-label') || ''),
+          tag: node.tagName,
+        }))
+        .filter((item) => item.label && isAction(item.label));
       const allCards = Array.from(document.querySelectorAll('article'))
-        .filter((card) => card.querySelector(actionsSelector));
-      return allCards.map((card, index) => {
+        .map((card) => ({ card, actions: getActions(card) }))
+        .filter((item) => item.actions.length > 0);
+      return allCards.map(({ card, actions }, index) => {
         const lines = String(card.innerText || '').split(/\\n+/).map(cleanText).filter(Boolean);
         let cursor = 0;
         const title = lines[cursor++] || null;
@@ -176,10 +197,6 @@ async function readDocumentCards(targetId, { limit } = {}) {
         }
         const date = lines[cursor++] || null;
         const summary = lines[cursor++] || null;
-        const actions = Array.from(card.querySelectorAll(actionsSelector)).map((button, actionIndex) => ({
-          id: actionIndex + 1,
-          label: cleanText(button.innerText),
-        }));
         return {
           id: index + 1,
           title,
@@ -231,19 +248,22 @@ async function openDocumentAction(targetId, documentId, actionId) {
   await closeDocumentDialog(targetId);
   const result = await evaluateOnTarget(targetId, `
     (() => {
-      const actionsSelector = ${JSON.stringify(DOCUMENT_ACTION_SELECTOR)};
+      const cleanText = (value) => String(value || '').replace(/\\s+/g, ' ').trim();
+      const isAction = (value) => /transcript|slides|report|release|filing/i.test(cleanText(value));
+      const getActions = (card) => Array.from(card.querySelectorAll('button, [role="button"], a'))
+        .filter((node) => isAction(node.innerText || node.getAttribute?.('aria-label') || ''));
       const cards = Array.from(document.querySelectorAll('article'))
-        .filter((card) => card.querySelector(actionsSelector));
+        .filter((card) => getActions(card).length > 0);
       const card = cards[${Number(documentId) - 1}] || null;
       if (!card) return { success: false, error: 'Document not found' };
-      const buttons = Array.from(card.querySelectorAll(actionsSelector));
+      const buttons = getActions(card);
       const button = buttons[${Number(actionId) - 1}] || null;
       if (!button) return { success: false, error: 'Document action not found' };
       button.scrollIntoView({ block: 'center' });
       button.click();
       return {
         success: true,
-        label: String(button.innerText || '').replace(/\\s+/g, ' ').trim(),
+        label: cleanText(button.innerText || button.getAttribute?.('aria-label') || ''),
       };
     })()
   `);
@@ -309,8 +329,65 @@ function formatDocumentMarkdown(payload) {
   return linesToMarkdown(lines);
 }
 
+function normalizeDocumentPayload(payload) {
+  if (!payload) return payload;
+  const noisyLabels = new Set([
+    'Event transcript',
+    'Call transcript',
+    'Press release',
+    'Slides',
+    'Annual report',
+    'Quarterly report',
+    'Earnings release',
+    'AI Summary',
+  ]);
+
+  const summary = clean(payload.summary);
+  const normalizedSections = [];
+  const seenItems = new Set();
+  const selectedItems = [];
+
+  function isRedundantItem(item) {
+    return selectedItems.some((existing) =>
+      existing === item
+      || existing.includes(item)
+      || item.includes(existing));
+  }
+
+  for (const section of payload.sections || []) {
+    const heading = clean(section.heading);
+    const items = [];
+    for (const rawItem of section.items || []) {
+      const item = clean(rawItem);
+      if (!item) continue;
+      if (noisyLabels.has(item)) continue;
+      if (summary && item === summary) continue;
+      if (/^full .*transcript$/i.test(item)) continue;
+      if (item.length < 8 && !/[0-9]/.test(item)) continue;
+      if (seenItems.has(item)) continue;
+      if (isRedundantItem(item)) continue;
+      seenItems.add(item);
+      selectedItems.push(item);
+      items.push(item);
+    }
+    if (items.length === 0) continue;
+    normalizedSections.push({ heading: heading || 'Summary', items });
+  }
+
+  const cleanedSummary = !summary || noisyLabels.has(summary) || /^slides$/i.test(summary)
+    ? null
+    : summary;
+
+  return {
+    ...payload,
+    summary: cleanedSummary,
+    sections: normalizedSections,
+    has_substantive_content: Boolean(cleanedSummary || normalizedSections.length > 0),
+  };
+}
+
 async function extractOpenDocumentDialog(targetId, actionLabel) {
-  const payload = await evaluateOnTarget(targetId, `
+  const rawPayload = await evaluateOnTarget(targetId, `
     (() => {
       const cleanText = (value) => String(value || '').replace(/\\s+/g, ' ').trim();
       const dialog = document.querySelector('[role="dialog"], [class*="dialog-"]');
@@ -319,16 +396,28 @@ async function extractOpenDocumentDialog(targetId, actionLabel) {
       const lines = rawLines.filter((line) => line.toLowerCase() !== 'close');
       const title = String(lines[0] || '').replace(/^Close\\s+/i, '') || null;
       const date = lines.find((line, index) => index > 0 && /^([A-Z][a-z]{2,8} \\d{1,2}, \\d{4})$/.test(line)) || null;
-      const actionLabel = lines.find((line) => /transcript|report|release/i.test(line)) || null;
-      const aiIndex = lines.findIndex((line) => /^AI Summary$/i.test(line));
-      const contentLines = aiIndex >= 0 ? lines.slice(aiIndex + 1) : lines.slice(3);
-      const sectionHeadings = /summary|highlights|guidance|performance|metrics|uncertainties|developments|financing|conditions/i;
+      const actionLabel = lines.find((line) => /transcript|report|release|slides/i.test(line)) || null;
+
+      const contentNodes = Array.from(dialog.querySelectorAll('h1, h2, h3, h4, p, li'))
+        .map((node) => ({
+          tag: node.tagName,
+          text: cleanText(node.innerText),
+        }))
+        .filter((item) => item.text);
+
+      const noisy = /^(close|ai summary|event transcript|call transcript|press release|slides|annual report|quarterly report|earnings release|full .*transcript|more)$/i;
+      const sectionHeading = /summary|highlights|guidance|performance|metrics|uncertainties|developments|financing|conditions|outlook|risks|strategy|market|introduction|conclusion|q&a/i;
       const sections = [];
       let current = null;
-      for (const line of contentLines) {
-        if (!line || /^(More|Full .*transcript)$/.test(line)) continue;
-        if (sectionHeadings.test(line) && line.length < 60) {
-          current = { heading: line, items: [] };
+
+      for (const item of contentNodes) {
+        const text = item.text;
+        if (!text || noisy.test(text)) continue;
+        if (text === title || text === date || text === ${JSON.stringify(actionLabel || null)}) continue;
+        if (/^([A-Z][a-z]{2,8} \\d{1,2}, \\d{4})$/.test(text)) continue;
+        const isHeading = /^H[1-4]$/.test(item.tag) || (sectionHeading.test(text) && text.length < 70);
+        if (isHeading) {
+          current = { heading: text, items: [] };
           sections.push(current);
           continue;
         }
@@ -336,17 +425,24 @@ async function extractOpenDocumentDialog(targetId, actionLabel) {
           current = { heading: 'Summary', items: [] };
           sections.push(current);
         }
-        if (!current.items.includes(line)) current.items.push(line);
+        if (!current.items.includes(text)) current.items.push(text);
       }
+
+      const paragraphTexts = contentNodes
+        .filter((item) => item.tag === 'P' || item.tag === 'LI')
+        .map((item) => item.text)
+        .filter((text) => !noisy.test(text) && text !== title && text !== date);
+
       return {
         title,
         date,
         action_label: ${JSON.stringify(actionLabel || null)},
-        summary: lines.find((line, index) => index > 2 && !/transcript|report|release|AI Summary/i.test(line) && line.length > 30) || null,
+        summary: paragraphTexts.find((line) => line.length > 35) || null,
         sections,
       };
     })()
   `);
+  const payload = normalizeDocumentPayload(rawPayload);
   return {
     ...payload,
     markdown: formatDocumentMarkdown(payload),
@@ -405,6 +501,517 @@ function pairLines(lines = []) {
     pairs.push({ label: lines[index], value: lines[index + 1] });
   }
   return pairs;
+}
+
+function normalizeFinancialTabName(value) {
+  return clean(value)
+    .replace(/\bFinancial\b/i, 'Financials')
+    .replace(/\bStatement\b/i, 'Statements')
+    .replace(/\bStati tic\b/i, 'Statistics')
+    .replace(/\bDividend\b/i, 'Dividends')
+    .replace(/\bEarning\b/i, 'Earnings')
+    .replace(/\bFinancials health\b/i, 'Financial health')
+    .replace(/\bBa ic\b/gi, 'Basic')
+    .replace(/\bEmployee \b/gi, 'Employees ')
+    .replace(/\bBalance  heet\b/gi, 'Balance sheet')
+    .replace(/\bCa h flow\b/gi, 'Cash flow');
+}
+
+function findLineValue(lines, label) {
+  const index = lines.indexOf(label);
+  if (index < 0) return null;
+  const value = clean(lines[index + 1] || '');
+  if (!value) return null;
+  const knownLabels = new Set([
+    'Report period',
+    'EPS estimate',
+    'Revenue estimate',
+    'Last ex-dividend date',
+    'Last payment date',
+    'Dividend amount',
+    'Dividend yield TTM',
+  ]);
+  if (knownLabels.has(value)) return null;
+  return value;
+}
+
+function buildFinancialSectionMarkdown(sectionName, payload) {
+  const lines = payload.lines || [];
+  const summary = clean(payload.summary);
+  const pageUrl = payload.href || payload.page_url || null;
+  const parts = [`## ${sectionName}`];
+  if (pageUrl) parts.push(`- URL: ${pageUrl}`);
+  if (summary) parts.push(summary);
+
+  if (sectionName === 'Earnings') {
+    const reportPeriod = findLineValue(lines, 'Report period');
+    const epsEstimate = findLineValue(lines, 'EPS estimate');
+    const revenueEstimate = findLineValue(lines, 'Revenue estimate');
+    if (reportPeriod) parts.push(`- Next report period: ${reportPeriod}`);
+    if (epsEstimate) parts.push(`- EPS estimate: ${epsEstimate}`);
+    if (revenueEstimate) parts.push(`- Revenue estimate: ${revenueEstimate}`);
+    if (payload.table_rows?.length) {
+      parts.push('### Recent Estimate Table');
+      parts.push(...payload.table_rows.map((row) => {
+        const cells = row.periods.filter((p) => p.value).map((p) => `${p.period}: ${p.value}`).join(' | ');
+        return `- ${row.label}: ${cells}`;
+      }));
+    }
+    return linesToMarkdown(parts);
+  }
+
+  if (sectionName === 'Dividends') {
+    const dividendAmount = findLineValue(lines, 'Dividend amount');
+    const dividendYield = findLineValue(lines, 'Dividend yield TTM');
+    const exDate = findLineValue(lines, 'Last ex-dividend date');
+    const paymentDate = findLineValue(lines, 'Last payment date');
+    if (dividendAmount) parts.push(`- Dividend amount: ${dividendAmount}`);
+    if (dividendYield) parts.push(`- Dividend yield TTM: ${dividendYield}`);
+    if (exDate) parts.push(`- Last ex-dividend date: ${exDate}`);
+    if (paymentDate) parts.push(`- Last payment date: ${paymentDate}`);
+    return linesToMarkdown(parts);
+  }
+
+  if (sectionName === 'Statements') {
+    const keyLabels = ['Total revenue', 'Gross profit', 'Operating income', 'Pretax income'];
+    const labels = keyLabels.filter((label) => lines.includes(label));
+    if (labels.length > 0) parts.push(`- Metrics: ${labels.join(', ')}`);
+    return linesToMarkdown(parts);
+  }
+
+  if (sectionName === 'Statistics') {
+    const keyLabels = [
+      'Price-to-sales ratio',
+      'Enterprise value to EBITDA ratio',
+      'Employees',
+    ].filter((label) => lines.includes(label));
+    if (keyLabels.length > 0) parts.push(`- Focus: ${keyLabels.join(', ')}`);
+    if (payload.table_rows?.length) {
+      parts.push('### Recent Table Data');
+      parts.push(...payload.table_rows.map((row) => {
+        const cells = row.periods.filter((p) => p.value).map((p) => `${p.period}: ${p.value}`).join(' | ');
+        return `- ${row.label}: ${cells}`;
+      }));
+    }
+    return linesToMarkdown(parts);
+  }
+
+  if (sectionName === 'Revenue') {
+    const modes = ['By source', 'By country'].filter((label) => lines.includes(label));
+    if (modes.length > 0) parts.push(`- Breakdown views: ${modes.join(', ')}`);
+    if (payload.table_rows?.length) {
+      parts.push('### Recent Table Data');
+      parts.push(...payload.table_rows.map((row) => {
+        const cells = row.periods.filter((p) => p.value).map((p) => `${p.period}: ${p.value}`).join(' | ');
+        return `- ${row.label}: ${cells}`;
+      }));
+    }
+    return linesToMarkdown(parts);
+  }
+
+  if (sectionName === 'Financial health') {
+    const keyLabels = ['Total assets', 'Total liabilities', 'Total equity', 'Total debt', 'Net debt']
+      .filter((label) => lines.includes(label));
+    if (keyLabels.length > 0) parts.push(`- Balance sheet lines: ${keyLabels.join(', ')}`);
+    return linesToMarkdown(parts);
+  }
+
+  return linesToMarkdown(parts);
+}
+
+function isFinancialPeriodLabel(line) {
+  return /^Q[1-4] '\d{2}$/.test(line) || /^TTM$/.test(line);
+}
+
+function isFinancialDateLabel(line) {
+  return /^(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) 20\d{2}$/.test(line);
+}
+
+function isNumericLike(line) {
+  return /[0-9]/.test(line) && !isFinancialPeriodLabel(line) && !isFinancialDateLabel(line);
+}
+
+function parseFinancialTableSeries(lines = []) {
+  const currencyIndex = lines.indexOf('Currency: USD');
+  if (currencyIndex < 0) return { periods: [], metrics: [] };
+
+  const periods = [];
+  let cursor = currencyIndex + 1;
+  while (cursor < lines.length) {
+    const line = lines[cursor];
+    if (isFinancialPeriodLabel(line)) {
+      periods.push(line);
+      cursor += 1;
+      if (isFinancialDateLabel(lines[cursor] || '')) cursor += 1;
+      continue;
+    }
+    break;
+  }
+
+  const metrics = [];
+  while (cursor < lines.length) {
+    const label = clean(lines[cursor] || '');
+    if (!label) {
+      cursor += 1;
+      continue;
+    }
+    if (/^(Annual|Quarterly|More|Currency: USD)$/.test(label)) {
+      cursor += 1;
+      continue;
+    }
+    if (isFinancialPeriodLabel(label) || isFinancialDateLabel(label)) break;
+    if (isNumericLike(label)) {
+      cursor += 1;
+      continue;
+    }
+
+    let hasGrowth = clean(lines[cursor + 1] || '') === 'YoY growth';
+    cursor += hasGrowth ? 2 : 1;
+    const values = [];
+    const growth = [];
+
+    for (let index = 0; index < periods.length && cursor < lines.length; index += 1) {
+      const value = clean(lines[cursor] || '');
+      if (!isNumericLike(value)) break;
+      values.push(value);
+      cursor += 1;
+      if (hasGrowth) {
+        const growthValue = clean(lines[cursor] || '');
+        if (!isNumericLike(growthValue)) break;
+        growth.push(growthValue);
+        cursor += 1;
+      }
+    }
+
+    if (values.length > 0) {
+      metrics.push({ label, values, growth });
+      continue;
+    }
+  }
+
+  return { periods, metrics };
+}
+
+function pickRecentMetricRows(series, labels, count = 4) {
+  const periods = series.periods || [];
+  const recentPeriods = periods.slice(-count);
+  const rows = [];
+
+  for (const label of labels) {
+    const metric = (series.metrics || []).find((item) => item.label === label);
+    if (!metric) continue;
+    const recentValues = metric.values.slice(-recentPeriods.length);
+    const recentGrowth = metric.growth?.slice(-recentPeriods.length) || [];
+    rows.push({
+      label,
+      periods: recentPeriods.map((period, index) => ({
+        period,
+        value: recentValues[index] || null,
+        growth: recentGrowth[index] || null,
+      })),
+    });
+  }
+
+  return rows;
+}
+
+function normalizeSeriesLabel(value) {
+  return clean(value)
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .replace(/\bstate\b/g, 'states')
+    .replace(/\bgraphic\b/g, 'graphics')
+    .replace(/\bestimate\b/g, 'estimate')
+    .replace(/\breported\b/g, 'reported')
+    .replace(/\bsurprise\b/g, 'surprise')
+    .trim();
+}
+
+function parseRevenueBlocks(lines = []) {
+  const sections = [];
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index];
+    if (line !== 'By source' && line !== 'By country') continue;
+    const mode = line === 'By source' ? 'source' : 'country';
+    let cursor = index + 1;
+    const years = [];
+    while (cursor < lines.length && /^20\d{2}$/.test(lines[cursor])) {
+      years.push(lines[cursor]);
+      cursor += 1;
+    }
+    while (cursor < lines.length && isNumericLike(lines[cursor])) {
+      cursor += 1;
+    }
+    const legendLabels = [];
+    while (cursor < lines.length) {
+      const label = clean(lines[cursor] || '');
+      if (!label) {
+        cursor += 1;
+        continue;
+      }
+      if (label === 'Currency: USD') {
+        cursor += 1;
+        break;
+      }
+      if (label === 'By source' || label === 'By country') break;
+      if (/^(Overview|Statements|Statistics|Dividends|Earnings|Revenue|More|Show more)$/.test(label)) break;
+      if (isNumericLike(label) || /^20\d{2}$/.test(label)) {
+        cursor += 1;
+        continue;
+      }
+      legendLabels.push(label);
+      cursor += 1;
+    }
+
+    const dataYears = [];
+    while (cursor < lines.length && /^20\d{2}$/.test(lines[cursor])) {
+      dataYears.push(lines[cursor]);
+      cursor += 1;
+    }
+
+    const activeYears = dataYears.length > 0 ? dataYears : years;
+    const rows = [];
+    while (cursor < lines.length) {
+      const label = clean(lines[cursor] || '');
+      if (!label) {
+        cursor += 1;
+        continue;
+      }
+      if (label === 'By source' || label === 'By country') break;
+      if (/^(Overview|Statements|Statistics|Dividends|Earnings|Revenue|More|Show more)$/.test(label)) break;
+      if (isNumericLike(label) || /^20\d{2}$/.test(label)) {
+        cursor += 1;
+        continue;
+      }
+      cursor += 1;
+      const values = [];
+      while (cursor < lines.length && (isNumericLike(lines[cursor]) || lines[cursor] === '—')) {
+        values.push(lines[cursor]);
+        cursor += 1;
+      }
+      if (values.length > 0) rows.push({ label, values });
+    }
+    sections.push({ mode, years: activeYears, legend_labels: legendLabels, rows });
+  }
+  return sections;
+}
+
+function pickRecentRevenueRows(sections = [], mode, labels = [], count = 3) {
+  const section = sections.find((item) => item.mode === mode);
+  if (!section) return [];
+  const years = section.years.slice(-count);
+  return labels.flatMap((label) => {
+    const normalized = normalizeSeriesLabel(label);
+    const row = section.rows.find((item) => normalizeSeriesLabel(item.label) === normalized);
+    if (!row) return [];
+    const values = row.values.slice(-years.length);
+    return [{
+      label,
+      periods: years.map((year, index) => ({
+        period: year,
+        value: values[index] || null,
+        growth: null,
+      })),
+    }];
+  });
+}
+
+function parseEarningsSeries(lines = []) {
+  const start = lines.indexOf('FORECAST');
+  if (start < 0) return { periods: [], rows: [] };
+  const periods = [];
+  let cursor = start + 1;
+  while (cursor < lines.length && isFinancialPeriodLabel(lines[cursor])) {
+    periods.push(lines[cursor]);
+    cursor += 1;
+  }
+  while (cursor < lines.length && isNumericLike(lines[cursor])) {
+    cursor += 1;
+  }
+  while (cursor < lines.length && !/^Currency: USD$/.test(lines[cursor])) {
+    if (lines[cursor] === 'Revenue' || lines[cursor] === 'Annual' || lines[cursor] === 'Quarterly' || lines[cursor] === 'More') {
+      return { periods, rows: [] };
+    }
+    cursor += 1;
+  }
+  if (lines[cursor] === 'Currency: USD') cursor += 1;
+  const dataPeriods = [];
+  while (cursor < lines.length && isFinancialPeriodLabel(lines[cursor])) {
+    dataPeriods.push(lines[cursor]);
+    cursor += 1;
+  }
+  const rows = [];
+  while (cursor < lines.length) {
+    const label = clean(lines[cursor] || '');
+    if (!label) {
+      cursor += 1;
+      continue;
+    }
+    if (/^(Annual|Quarterly|More|Currency: USD|By source|By country|Revenue)$/.test(label)) break;
+    if (isFinancialPeriodLabel(label) || isNumericLike(label)) {
+      cursor += 1;
+      continue;
+    }
+    cursor += 1;
+    const values = [];
+    while (cursor < lines.length && (isNumericLike(lines[cursor]) || lines[cursor] === '—')) {
+      values.push(lines[cursor]);
+      cursor += 1;
+    }
+    if (values.length > 0) rows.push({ label, values });
+    else break;
+  }
+  return { periods: dataPeriods.length > 0 ? dataPeriods : periods, rows };
+}
+
+function pickRecentEarningsRows(series, labels = [], count = 6) {
+  const periods = (series.periods || []).slice(-count);
+  return labels.flatMap((label) => {
+    const normalized = normalizeSeriesLabel(label);
+    const row = (series.rows || []).find((item) => normalizeSeriesLabel(item.label) === normalized);
+    if (!row) return [];
+    const values = row.values.slice(-periods.length);
+    return [{
+      label,
+      periods: periods.map((period, index) => ({
+        period,
+        value: values[index] || null,
+        growth: null,
+      })),
+    }];
+  });
+}
+
+function financialTabCategory(href) {
+  const url = String(href || '');
+  if (url.includes('/financials-overview/')) return 'overview';
+  if (url.includes('/financials-income-statement/')) return 'statements';
+  if (url.includes('/financials-statistics-and-ratios/')) return 'statistics';
+  if (url.includes('/financials-dividends/')) return 'dividends';
+  if (url.includes('/financials-earnings/')) return 'earnings';
+  if (url.includes('/financials-revenue/')) return 'revenue';
+  if (url.includes('/financials-balance-sheet/')) return 'balance_sheet';
+  if (url.includes('/financials-cash-flow/')) return 'cash_flow';
+  return null;
+}
+
+function pickFinancialTabs(tabs = []) {
+  const prioritized = uniqueBy(
+    tabs
+      .map((tab) => ({
+        name: normalizeFinancialTabName(tab.name),
+        href: String(tab.href || ''),
+        category: financialTabCategory(tab.href),
+      }))
+      .filter((tab) => tab.category),
+    (tab) => tab.category,
+  );
+  const order = ['overview', 'statements', 'statistics', 'dividends', 'earnings', 'revenue', 'balance_sheet', 'cash_flow'];
+  return prioritized.sort((a, b) => order.indexOf(a.category) - order.indexOf(b.category));
+}
+
+async function openPageTarget(url, { openIfMissing = true } = {}) {
+  let state = await list();
+  let target = state.tabs.find((tab) => String(tab.url || '').startsWith(url));
+
+  if (!target && openIfMissing) {
+    const created = await newTab({ url });
+    if (!created.success || !created.opened) {
+      throw new Error(created.error || `Could not open ${url}`);
+    }
+    state = await list();
+    target = state.tabs.find((tab) => tab.id === created.opened.id) || created.opened;
+  }
+
+  if (!target) throw new Error(`No open tab for ${url}`);
+
+  await switchTab({ index: target.index });
+  await waitForReady(target.id, url, { requireBodyText: true });
+  return target;
+}
+
+async function readFinancialTabPage(targetId, sectionName) {
+  const payload = await evaluateOnTarget(targetId, `
+    (() => {
+      const cleanText = (value) => String(value || '').replace(/[\\u200B-\\u200D\\uFEFF]/g, '').replace(/\\s+/g, ' ').trim();
+      const main = document.querySelector('main') || document.body;
+      const lines = String(main?.innerText || '').split(/\\n+/).map(cleanText).filter(Boolean);
+      const headings = Array.from(main.querySelectorAll('h1, h2, h3'))
+        .map((node) => cleanText(node.innerText))
+        .filter(Boolean);
+      return {
+        title: document.title,
+        href: location.href,
+        headings,
+        lines,
+      };
+    })()
+  `);
+
+  const title = clean(payload.title).replace(' – TradingView', '');
+  const headings = (payload.headings || []).filter(Boolean);
+  const lines = (payload.lines || []).filter(Boolean);
+  const summary = lines.find((line) =>
+    line.length > 60
+    && !/^As of today /i.test(line)
+    && !/OverviewFinancialsNewsDocumentsCommunityTechnicalsForecastsSeasonalsOptionsBondsETFs/i.test(line)
+    && !/^(Overview|Statements|Statistics|Dividends|Earnings|Revenue|More)$/i.test(line)
+    && line !== title
+    && !headings.includes(line)) || null;
+
+  const trimmedLines = [];
+  let started = false;
+  for (const line of lines) {
+    if (!started) {
+      if (headings.includes(line) || line === sectionName || line === title) started = true;
+      else continue;
+    }
+    if (/^OverviewFinancialsNewsDocumentsCommunityTechnicalsForecastsSeasonalsOptionsBondsETFs$/i.test(line)) continue;
+    if (/^More$/.test(line) && trimmedLines.length === 0) continue;
+    trimmedLines.push(line);
+    if (trimmedLines.length >= 80) break;
+  }
+
+  const series = parseFinancialTableSeries(lines);
+  let table_rows = [];
+  if (sectionName === 'Statements') {
+    table_rows = pickRecentMetricRows(series, ['Total revenue', 'Gross profit', 'Operating income', 'Pretax income', 'Net income']);
+  } else if (sectionName === 'Statistics') {
+    table_rows = pickRecentMetricRows(series, [
+      'Price to earnings ratio',
+      'Price to sales ratio',
+      'Enterprise value to EBITDA ratio',
+      'Current ratio',
+      'Debt to equity ratio',
+    ]);
+  } else if (sectionName === 'Earnings') {
+    table_rows = pickRecentEarningsRows(parseEarningsSeries(lines), ['Reported', 'Estimate', 'Surprise']);
+  } else if (sectionName === 'Revenue') {
+    const revenueSections = parseRevenueBlocks(lines);
+    table_rows = [
+      ...pickRecentRevenueRows(revenueSections, 'source', ['Compute & Networking', 'Graphics'], 3),
+      ...pickRecentRevenueRows(revenueSections, 'country', ['United States', 'Taiwan', 'China (Including Hong Kong)'], 3),
+    ];
+  } else if (sectionName === 'Financial health') {
+    table_rows = pickRecentMetricRows(series, ['Total assets', 'Total liabilities', 'Total equity', 'Total debt', 'Net debt']);
+  }
+  const markdown = buildFinancialSectionMarkdown(sectionName, {
+    ...payload,
+    summary,
+    table_rows,
+  });
+
+  return {
+    name: sectionName,
+    page_title: payload.title,
+    page_url: payload.href,
+    headings,
+    summary,
+    table_periods: series.periods,
+    table_rows,
+    excerpt_lines: trimmedLines.slice(0, 60),
+    markdown,
+  };
 }
 
 async function readFinancialsPage(targetId) {
@@ -477,23 +1084,36 @@ export async function getDocuments({ ticker, openIfMissing = true, limit } = {})
   for (const document of documents) {
     const actions = [];
     for (const action of document.actions || []) {
-      const opened = await openDocumentAction(context.target.id, document.id, action.id);
-      if (opened.action === 'dialog' && /transcript/i.test(opened.label)) {
-        await activateAiSummary(context.target.id);
-      }
-      const detail = opened.action === 'dialog'
-        ? await extractOpenDocumentDialog(context.target.id, opened.label)
-        : await readOpenedDocumentTab(opened.opened_tab);
-      actions.push({
-        id: action.id,
-        label: opened.label,
-        markdown: detail?.markdown || null,
-        opened_tab: opened.opened_tab || null,
-      });
-      if (opened.action === 'dialog') {
+      try {
+        const opened = await openDocumentAction(context.target.id, document.id, action.id);
+        if (opened.action === 'dialog' && /transcript/i.test(opened.label)) {
+          await activateAiSummary(context.target.id);
+        }
+        const detail = opened.action === 'dialog'
+          ? await extractOpenDocumentDialog(context.target.id, opened.label)
+          : await readOpenedDocumentTab(opened.opened_tab);
+        actions.push({
+          id: action.id,
+          label: opened.label,
+          markdown: detail?.markdown || null,
+          has_substantive_content: detail?.has_substantive_content ?? Boolean(detail?.summary || detail?.sections?.length),
+          opened_tab: opened.opened_tab || null,
+        });
+        if (opened.action === 'dialog') {
+          await closeDocumentDialog(context.target.id);
+        } else if (opened.opened_tab?.id) {
+          await closeOpenedDocumentTab(opened.opened_tab.id, context.target.index);
+        }
+      } catch (err) {
+        actions.push({
+          id: action.id,
+          label: action.label,
+          markdown: null,
+          has_substantive_content: false,
+          error: err.message,
+          opened_tab: null,
+        });
         await closeDocumentDialog(context.target.id);
-      } else if (opened.opened_tab?.id) {
-        await closeOpenedDocumentTab(opened.opened_tab.id, context.target.index);
       }
     }
     details.push({ ...document, details: actions });
@@ -513,11 +1133,36 @@ export async function getDocuments({ ticker, openIfMissing = true, limit } = {})
 export async function getFinancials({ ticker, openIfMissing = true } = {}) {
   const context = await ensureSymbolPage({ ticker, page: 'financials-overview/', openIfMissing });
   const payload = await readFinancialsPage(context.target.id);
+  const sectionTabs = pickFinancialTabs(payload.tabs || []).filter((tab) => tab.category !== 'overview');
+  const sections = [];
+
+  for (const tab of sectionTabs) {
+    try {
+      const target = await openPageTarget(tab.href, { openIfMissing: true });
+      sections.push(await readFinancialTabPage(target.id, tab.name));
+    } catch (err) {
+      sections.push({
+        name: tab.name,
+        page_url: tab.href,
+        error: err.message,
+        markdown: `## ${tab.name}\n- URL: ${tab.href}\n- Error: ${err.message}`,
+      });
+    }
+  }
+
+  const markdown = linesToMarkdown([
+    payload.markdown,
+    '',
+    ...sections.flatMap((section) => [section.markdown, '']),
+  ]).trim();
+
   return {
     success: true,
     action: 'financials_get',
     ticker: context.ticker,
     resolved_symbol: context.resolved_symbol,
     ...payload,
+    sections,
+    markdown,
   };
 }

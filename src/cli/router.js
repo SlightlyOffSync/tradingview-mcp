@@ -3,6 +3,7 @@
  * Zero dependencies — uses only Node.js built-ins.
  */
 import { parseArgs } from 'node:util';
+import { toContextText } from '../tools/_format.js';
 
 /** @type {Map<string, { description: string, options?: object, handler: Function, subcommands?: Map<string, object> }>} */
 const commands = new Map();
@@ -48,6 +49,9 @@ function summarizeRequirements(cmd) {
 
 function printHelp() {
   console.log('Usage: tv <command> [options]\n');
+  console.log('Global options:');
+  console.log('      --format <markdown|json>  Output mode for all commands (default: markdown)');
+  console.log('');
   console.log('Commands:');
   const labels = [];
   for (const [name, cmd] of commands) {
@@ -88,11 +92,47 @@ function printCommandHelp(name, cmd) {
     console.log(cmd.description);
   }
   if (cmd.details) console.log(`\n${cmd.details}`);
+  console.log('\nGlobal options:');
+  console.log('      --format <markdown|json>  Output mode (default: markdown)');
   printOptions(cmd.options || {});
 }
 
+function parseGlobalOptions(inputArgs) {
+  const args = [];
+  let format = 'markdown';
+
+  for (let index = 0; index < inputArgs.length; index += 1) {
+    const value = inputArgs[index];
+    if (value === '--format') {
+      const next = inputArgs[index + 1];
+      if (!next) throw new Error('Missing value for --format. Use "markdown" or "json".');
+      format = next;
+      index += 1;
+      continue;
+    }
+    if (value.startsWith('--format=')) {
+      format = value.slice('--format='.length);
+      continue;
+    }
+    args.push(value);
+  }
+
+  if (!['markdown', 'json'].includes(format)) {
+    throw new Error(`Invalid --format value "${format}". Use "markdown" or "json".`);
+  }
+
+  return { args, format };
+}
+
 export async function run(argv) {
-  const args = argv.slice(2);
+  let parsed;
+  try {
+    parsed = parseGlobalOptions(argv.slice(2));
+  } catch (err) {
+    handleError(err, 'json');
+    return;
+  }
+  const { args, format } = parsed;
 
   if (args.length === 0 || args[0] === '--help' || args[0] === '-h') {
     printHelp();
@@ -139,9 +179,9 @@ export async function run(argv) {
         printOptions(options);
         process.exit(0);
       }
-      await execute(handler, values, positionals);
+      await execute(handler, values, positionals, format);
     } catch (err) {
-      handleError(err);
+      handleError(err, format);
     }
   } else {
     handler = cmd.handler;
@@ -157,30 +197,42 @@ export async function run(argv) {
         printCommandHelp(cmdName, cmd);
         process.exit(0);
       }
-      await execute(handler, values, positionals);
+      await execute(handler, values, positionals, format);
     } catch (err) {
-      handleError(err);
+      handleError(err, format);
     }
   }
 }
 
-async function execute(handler, values, positionals) {
+async function execute(handler, values, positionals, format) {
   try {
     const result = await handler(values, positionals);
-    console.log(JSON.stringify(result, null, 2));
+    if (format === 'json') {
+      console.log(JSON.stringify(result, null, 2));
+    } else {
+      console.log(toContextText(result));
+    }
     process.exit(0);
   } catch (err) {
-    handleError(err);
+    handleError(err, format);
   }
 }
 
-function handleError(err) {
+function handleError(err, format = 'json') {
   const message = err.message || String(err);
   // Connection failures get exit code 2
   if (/CDP|connection|ECONNREFUSED|not running/i.test(message)) {
-    console.error(JSON.stringify({ success: false, error: message }, null, 2));
+    if (format === 'json') {
+      console.error(JSON.stringify({ success: false, error: message }, null, 2));
+    } else {
+      console.error(message);
+    }
     process.exit(2);
   }
-  console.error(JSON.stringify({ success: false, error: message }, null, 2));
+  if (format === 'json') {
+    console.error(JSON.stringify({ success: false, error: message }, null, 2));
+  } else {
+    console.error(message);
+  }
   process.exit(1);
 }

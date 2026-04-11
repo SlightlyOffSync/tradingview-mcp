@@ -11,6 +11,7 @@ import { execFileSync, execSync } from 'child_process';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { writeFileSync, unlinkSync } from 'fs';
+import { toContextText } from '../src/tools/_format.js';
 
 function require_fs() { return { writeFileSync, unlinkSync }; }
 
@@ -39,6 +40,7 @@ describe('CLI — help and routing', () => {
     const { stdout, exitCode } = run(['--help']);
     assert.equal(exitCode, 0);
     assert.ok(stdout.includes('Usage: tv'));
+    assert.ok(stdout.includes('--format <markdown|json>'));
     assert.ok(stdout.includes('status'));
     assert.ok(stdout.includes('pine'));
     assert.ok(stdout.includes('quote'));
@@ -93,7 +95,7 @@ describe('CLI — help and routing', () => {
 describe('CLI — pine analyze (offline)', () => {
   it('analyzes clean v6 script', () => {
     const source = '//@version=6\nindicator("test")\nplot(close)';
-    const { stdout, exitCode } = run(['pine', 'analyze'], { input: source });
+    const { stdout, exitCode } = run(['pine', 'analyze', '--format', 'json'], { input: source });
     assert.equal(exitCode, 0);
     const result = JSON.parse(stdout);
     assert.equal(result.success, true);
@@ -102,7 +104,7 @@ describe('CLI — pine analyze (offline)', () => {
 
   it('detects array out of bounds', () => {
     const source = '//@version=6\nindicator("test")\narr = array.from(1, 2, 3)\nval = array.get(arr, 5)';
-    const { stdout, exitCode } = run(['pine', 'analyze'], { input: source });
+    const { stdout, exitCode } = run(['pine', 'analyze', '--format', 'json'], { input: source });
     assert.equal(exitCode, 0);
     const result = JSON.parse(stdout);
     assert.equal(result.issue_count, 1);
@@ -111,7 +113,7 @@ describe('CLI — pine analyze (offline)', () => {
 
   it('detects strategy.entry without strategy()', () => {
     const source = '//@version=6\nindicator("test")\nstrategy.entry("long", strategy.long)';
-    const { stdout, exitCode } = run(['pine', 'analyze'], { input: source });
+    const { stdout, exitCode } = run(['pine', 'analyze', '--format', 'json'], { input: source });
     assert.equal(exitCode, 0);
     const result = JSON.parse(stdout);
     assert.ok(result.diagnostics.some(d => d.message.includes('strategy()')));
@@ -129,7 +131,7 @@ describe('CLI — pine analyze (offline)', () => {
     const tmpFile = join(__dirname, '_test_script.pine');
     writeFileSync(tmpFile, '//@version=6\nindicator("test")\nplot(close)');
     try {
-      const { stdout, exitCode } = run(['pine', 'analyze', '--file', tmpFile]);
+      const { stdout, exitCode } = run(['pine', 'analyze', '--file', tmpFile, '--format', 'json']);
       assert.equal(exitCode, 0);
       const result = JSON.parse(stdout);
       assert.equal(result.success, true);
@@ -142,7 +144,7 @@ describe('CLI — pine analyze (offline)', () => {
 describe('CLI — pine check (server compile)', () => {
   it('compiles valid Pine Script', () => {
     const source = '//@version=6\nindicator("test")\nplot(close)';
-    const { stdout, exitCode } = run(['pine', 'check'], { input: source });
+    const { stdout, exitCode } = run(['pine', 'check', '--format', 'json'], { input: source });
     assert.equal(exitCode, 0);
     const result = JSON.parse(stdout);
     assert.equal(result.success, true);
@@ -151,10 +153,30 @@ describe('CLI — pine check (server compile)', () => {
 
   it('returns errors for invalid Pine Script', () => {
     const source = '//@version=6\nindicator("test")\nplot(nonexistent_var)';
-    const { stdout, exitCode } = run(['pine', 'check'], { input: source });
+    const { stdout, exitCode } = run(['pine', 'check', '--format', 'json'], { input: source });
     assert.equal(exitCode, 0);
     const result = JSON.parse(stdout);
     assert.equal(result.compiled, false);
     assert.ok(result.error_count > 0);
+  });
+});
+
+describe('CLI — output formatting', () => {
+  it('rejects invalid global format values', () => {
+    const { exitCode, stderr } = run(['--format', 'xml', 'pine', 'analyze']);
+    assert.equal(exitCode, 1);
+    assert.ok(stderr.includes('Invalid --format value'));
+  });
+
+  it('defaults to markdown-like output', () => {
+    const stdout = toContextText({
+      success: true,
+      action: 'news_list',
+      headlines: [
+        { id: 1, headline: 'Bonds rally on CPI surprise', date: '2 minutes ago' },
+        { id: 2, headline: 'Oil gives back early gains', date: '5 minutes ago' },
+      ],
+    });
+    assert.equal(stdout, '1. Bonds rally on CPI surprise (2 minutes ago)\n2. Oil gives back early gains (5 minutes ago)');
   });
 });

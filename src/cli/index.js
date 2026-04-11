@@ -2,11 +2,12 @@
 
 /**
  * tv — CLI for TradingView Desktop via Chrome DevTools Protocol.
- * Outputs JSON to stdout. Errors to stderr.
+ * Outputs context-friendly markdown by default, or JSON via --format json.
+ * Errors go to stderr.
  * Exit codes: 0 success, 1 error, 2 connection failure.
  *
  * All 70 MCP tools are accessible via CLI commands.
- * Pipe-friendly: every command outputs JSON for use with jq.
+ * Agent-friendly by default, pipe-friendly via --format json.
  */
 
 // Register all commands
